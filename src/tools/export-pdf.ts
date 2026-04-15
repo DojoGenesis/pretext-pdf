@@ -154,7 +154,11 @@ async function exportToPdfInner(params: ExportParams, toolSpan: ReturnType<typeo
   const theme = THEMES[themeName];
   const pageSize = PAGE_SIZES[pageSizeName];
   const margins = { top: 72, right: 72, bottom: 72, left: 72 };
-  const contentWidth = pageSize.width - margins.left - margins.right;
+  // Subtract a 4pt measurement margin so Pretext breaks lines slightly before the
+  // actual page edge. This compensates for minor width differences between node-canvas
+  // (measurement) and pdf-lib (rendering) with variable fonts, preventing text from
+  // visually overflowing at line break boundaries.
+  const contentWidth = pageSize.width - margins.left - margins.right - 4;
   const contentHeight = pageSize.height - margins.top - margins.bottom;
 
   const ctx: RenderCtx = {
@@ -331,7 +335,7 @@ function renderHeading(page: PDFPage, block: PdfBlock, y: number, x: number, ctx
   for (const line of lines) {
     y -= headingLh;
     page.drawText(line.text, {
-      x, y, size: headingSize, font, color: ctx.theme.heading, maxWidth: ctx.contentWidth,
+      x, y, size: headingSize, font, color: ctx.theme.heading,
     });
   }
   y -= 4;
@@ -356,7 +360,7 @@ function renderText(page: PDFPage, block: PdfBlock, y: number, x: number, ctx: R
     }
     page.drawText(line.text, {
       x: x + indent, y, size: ctx.fontSize, font: ctx.fonts.body,
-      color: textColor, maxWidth: effectiveWidth,
+      color: textColor,
     });
   }
   // Tighter spacing for consecutive list items, normal spacing otherwise
@@ -549,7 +553,7 @@ function renderTable(page: PDFPage, block: PdfBlock, y: number, x: number, ctx: 
       for (const line of lines) {
         page.drawText(line.text, {
           x: x + col * colWidth + cellPadding, y: lineY, size: cellFontSize,
-          font, color: textColor, maxWidth: cellW,
+          font, color: textColor,
         });
         lineY -= cellLh;
       }
