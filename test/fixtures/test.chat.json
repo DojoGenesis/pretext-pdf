@@ -1,0 +1,38 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "How does Pretext handle text measurement?",
+      "timestamp": "2026-04-08T10:00:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Pretext uses a two-phase approach: prepare() segments the text and measures each segment via Canvas, caching widths. Then layout() walks the cached widths with pure arithmetic to count lines and compute height. This is ~0.0002ms per text block.",
+      "timestamp": "2026-04-08T10:00:05Z"
+    },
+    {
+      "role": "user",
+      "content": "What about variable fonts?",
+      "timestamp": "2026-04-08T10:01:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Variable fonts work through CSS font strings passed to prepare(). For example, '700 16px Fraunces' will measure using weight 700 of the Fraunces variable font. The Canvas API resolves variation axes automatically.",
+      "timestamp": "2026-04-08T10:01:08Z",
+      "disposition": {
+        "tone": "technical",
+        "verbosity": "verbose",
+        "depth": "deep",
+        "brevity": "expansive"
+      }
+    }
+  ],
+  "metadata": {
+    "title": "Pretext Typography Discussion",
+    "created": "2026-04-08T10:00:00Z",
+    "participants": [
+      "User",
+      "Assistant"
+    ]
+  }
+}
