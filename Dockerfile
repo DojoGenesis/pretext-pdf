@@ -17,6 +17,5 @@ COPY --from=builder /app/dist/ ./dist/
 COPY --from=builder /app/node_modules/ ./node_modules/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/fonts/ ./fonts/
-RUN adduser -D -u 1000 dojo
-USER dojo
+USER node
 ENTRYPOINT ["node", "dist/index.js"]
