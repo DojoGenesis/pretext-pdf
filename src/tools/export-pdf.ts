@@ -340,14 +340,16 @@ function renderHeading(page: PDFPage, block: PdfBlock, y: number, x: number, ctx
 
 function renderText(page: PDFPage, block: PdfBlock, y: number, x: number, ctx: RenderCtx): number {
   const textColor = block.metadata?.muted ? ctx.theme.muted : ctx.theme.text;
-  const indent = block.metadata?.blockquote ? 20 : 0;
+  const isBlockquote = !!block.metadata?.blockquote;
+  const isListItem = !!block.metadata?.listItem;
+  const indent = isBlockquote ? 20 : (block.metadata?.indent as number ?? 0);
   const effectiveWidth = ctx.contentWidth - indent;
 
   const { lines } = layoutLines(block.content, ctx.fontStrings.body, effectiveWidth, ctx.lineHeightPx);
 
   for (const line of lines) {
     y -= ctx.lineHeightPx;
-    if (block.metadata?.blockquote) {
+    if (isBlockquote) {
       page.drawRectangle({
         x: x + 4, y: y - 2, width: 3, height: ctx.lineHeightPx, color: ctx.theme.rule,
       });
@@ -357,7 +359,8 @@ function renderText(page: PDFPage, block: PdfBlock, y: number, x: number, ctx: R
       color: textColor, maxWidth: effectiveWidth,
     });
   }
-  y -= 6;
+  // Tighter spacing for consecutive list items, normal spacing otherwise
+  y -= isListItem ? 2 : 6;
   return y;
 }
 
@@ -515,28 +518,54 @@ function renderTable(page: PDFPage, block: PdfBlock, y: number, x: number, ctx: 
   const rows = (block.metadata?.rows as string[][]) ?? [];
   const colCount = header.length || (rows[0]?.length ?? 1);
   const colWidth = ctx.contentWidth / colCount;
-  const rowHeight = ctx.lineHeightPx + 4;
+  const cellPadding = 4;
+  const cellFontSize = ctx.fontSize - 1;
+  const cellLh = cellFontSize * 1.35;
+  // Build a CSS font string for table cell measurement
+  const cellFontStr = cssFontString(ctx.fonts.body.name || "Inter", cellFontSize);
 
-  y -= rowHeight;
-  page.drawRectangle({
-    x: x - 2, y: y - 2, width: ctx.contentWidth + 4, height: rowHeight,
-    color: ctx.theme.codeBackground,
-  });
-  for (let col = 0; col < header.length; col++) {
-    page.drawText(header[col], {
-      x: x + col * colWidth + 4, y: y + 2, size: ctx.fontSize - 1,
-      font: ctx.fonts.bodyBold, color: ctx.theme.heading, maxWidth: colWidth - 8,
-    });
+  // Helper: measure row height using Pretext, accounting for multi-line cells
+  function measureRowHeight(cells: string[]): number {
+    let maxLines = 1;
+    for (const cell of cells) {
+      const { height } = measureHeight(cell, cellFontStr, colWidth - cellPadding * 2, cellLh);
+      const lines = Math.max(1, Math.ceil(height / cellLh));
+      if (lines > maxLines) maxLines = lines;
+    }
+    return maxLines * cellLh + cellPadding * 2;
   }
 
-  for (const row of rows) {
-    y -= rowHeight;
-    for (let col = 0; col < row.length; col++) {
-      page.drawText(row[col], {
-        x: x + col * colWidth + 4, y: y + 2, size: ctx.fontSize - 1,
-        font: ctx.fonts.body, color: ctx.theme.text, maxWidth: colWidth - 8,
+  // Helper: render a single row (header or data)
+  function drawRow(cells: string[], rowY: number, rowH: number, font: PDFFont, textColor: ReturnType<typeof rgb>, bgColor?: ReturnType<typeof rgb>): number {
+    if (bgColor) {
+      page.drawRectangle({
+        x: x - 2, y: rowY - rowH, width: ctx.contentWidth + 4, height: rowH, color: bgColor,
       });
     }
+    for (let col = 0; col < cells.length; col++) {
+      const cellW = colWidth - cellPadding * 2;
+      const { lines } = layoutLines(cells[col], cellFontStr, cellW, cellLh);
+      let lineY = rowY - cellPadding - cellFontSize;
+      for (const line of lines) {
+        page.drawText(line.text, {
+          x: x + col * colWidth + cellPadding, y: lineY, size: cellFontSize,
+          font, color: textColor, maxWidth: cellW,
+        });
+        lineY -= cellLh;
+      }
+    }
+    return rowY - rowH;
+  }
+
+  // Render header
+  const headerHeight = measureRowHeight(header);
+  y = drawRow(header, y, headerHeight, ctx.fonts.bodyBold, ctx.theme.heading, ctx.theme.codeBackground);
+
+  // Render data rows with alternating subtle background
+  for (let i = 0; i < rows.length; i++) {
+    const rowH = measureRowHeight(rows[i]);
+    const bg = i % 2 === 1 ? ctx.theme.codeBackground : undefined;
+    y = drawRow(rows[i], y, rowH, ctx.fonts.body, ctx.theme.text, bg);
   }
 
   y -= 8;

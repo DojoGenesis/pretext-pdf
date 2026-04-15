@@ -53,8 +53,12 @@ export async function embedFonts(
 
     const [interBytes, frauncesBytes, codeBytes] = await Promise.all(fontReads);
 
-    const body = await pdf.embedFont(interBytes, { subset: true });
-    const bodyBold = await pdf.embedFont(interBytes, { subset: true });
+    // Inter-Variable.ttf subsetting is broken in @pdf-lib/fontkit — the subsetter
+    // corrupts glyph tables, producing PDFs where most body text characters are missing.
+    // Fraunces subsetting works fine, so this is Inter-specific, not all variable fonts.
+    // Trade-off: ~880KB larger PDFs, but all glyphs render correctly.
+    const body = await pdf.embedFont(interBytes, { subset: false });
+    const bodyBold = await pdf.embedFont(interBytes, { subset: false });
     const code = codeBytes
       ? await pdf.embedFont(codeBytes, { subset: true })
       : await pdf.embedFont(StandardFonts.Courier);
