@@ -8,23 +8,6 @@
 import { marked, type Token, type Tokens } from "marked";
 import type { PdfBlock, Renderer } from "./types.js";
 
-/**
- * Strip inline markdown formatting from text.
- * Handles: **bold**, *italic*, __bold__, _italic_, `code`,
- * [links](url), ~~strikethrough~~, and nested combinations.
- */
-function stripInlineMarkup(text: string): string {
-  return text
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")   // [link text](url) → link text
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")   // ![alt](url) → alt
-    .replace(/\*\*(.+?)\*\*/g, "$1")            // **bold** → bold
-    .replace(/__(.+?)__/g, "$1")                 // __bold__ → bold
-    .replace(/\*(.+?)\*/g, "$1")                 // *italic* → italic
-    .replace(/_(.+?)_/g, "$1")                   // _italic_ → italic
-    .replace(/~~(.+?)~~/g, "$1")                 // ~~strike~~ → strike
-    .replace(/`([^`]+)`/g, "$1");                // `code` → code
-}
-
 function extractFrontmatter(source: string): {
   frontmatter: Record<string, string> | null;
   body: string;
@@ -51,7 +34,7 @@ function tokensToBlocks(tokens: Token[]): PdfBlock[] {
         const t = token as Tokens.Heading;
         blocks.push({
           type: "heading",
-          content: stripInlineMarkup(t.text),
+          content: t.text,
           metadata: { level: t.depth },
         });
         break;
@@ -59,7 +42,7 @@ function tokensToBlocks(tokens: Token[]): PdfBlock[] {
 
       case "paragraph": {
         const t = token as Tokens.Paragraph;
-        blocks.push({ type: "text", content: stripInlineMarkup(t.text) });
+        blocks.push({ type: "text", content: t.text });
         break;
       }
 
@@ -92,18 +75,17 @@ function tokensToBlocks(tokens: Token[]): PdfBlock[] {
 
       case "list": {
         const t = token as Tokens.List;
-        // Emit each list item as a separate block so Pretext lays out each independently.
-        // Previously items were joined with \n into one text block, but Pretext treats
-        // \n as soft breaks (like CSS white-space: normal), collapsing them into one line.
-        for (let i = 0; i < t.items.length; i++) {
-          const raw = stripInlineMarkup(t.items[i].text);
-          const prefix = t.ordered ? `${i + 1}. ` : "\u2022 ";  // bullet character
-          blocks.push({
-            type: "text",
-            content: prefix + raw,
-            metadata: { listItem: true, listType: t.ordered ? "ol" : "ul", indent: 16 },
-          });
-        }
+        const items = t.items.map((item) => item.text);
+        const prefix = t.ordered ? "ol" : "ul";
+        blocks.push({
+          type: "text",
+          content: items
+            .map((text, i) =>
+              prefix === "ol" ? `${i + 1}. ${text}` : `  - ${text}`
+            )
+            .join("\n"),
+          metadata: { listType: prefix },
+        });
         break;
       }
 

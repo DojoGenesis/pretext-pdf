@@ -22,12 +22,8 @@
 ## Validation
 - [x] 10. Dogfood test — pdf-export skill exported as 4-page, 34.3KB PDF
 
-## Distribution (v0.1.0)
-- [x] `docker build` + push to ghcr.io/dojogenesis/pretext-pdf-mcp (CI/CD workflow)
-- [x] `npm publish` to npm registry (CI/CD workflow)
-- [x] README.md + LICENSE added
-- [x] GitHub Actions CI + Release workflows
-
 ## Remaining (future)
+- [ ] `docker build` + push to ghcr.io/dojogenesis/pretext-pdf-mcp
+- [ ] `npm publish` to npm registry
 - [ ] Run supply-chain-refresh.sh to normalize new skills into CAS
 - [ ] Add Recursive bold instance (RecursiveMonoLnrSt-Bold.ttf) for code emphasis
