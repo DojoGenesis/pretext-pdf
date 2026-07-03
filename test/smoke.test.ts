@@ -11,6 +11,7 @@ import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from "
 import { join } from "node:path";
 import { exportToPdf } from "../src/tools/export-pdf.js";
 import { chatRenderer } from "../src/renderers/chat.js";
+import { markdownRenderer } from "../src/renderers/markdown.js";
 
 const FIXTURES_DIR = join(import.meta.dirname, "fixtures");
 const OUTPUT_DIR = join(import.meta.dirname, "output");
@@ -559,5 +560,216 @@ describe("Chat renderer — pure parse", () => {
         return true;
       }
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Markdown renderer — pure parse unit tests
+// These call markdownRenderer.parse directly without touching the PDF pipeline.
+// ---------------------------------------------------------------------------
+
+describe("Markdown renderer — pure parse", () => {
+  // -------------------------------------------------------------------------
+  // 1. Frontmatter extraction
+  // -------------------------------------------------------------------------
+  test("frontmatter with name+description injects heading + subtitle text blocks, then parses body", async () => {
+    const source = `---
+name: My Document
+description: A short description
+---
+
+# Body Heading
+
+Body paragraph.
+`;
+
+    const blocks = await markdownRenderer.parse(source, "test.md");
+
+    // Block 0: heading from frontmatter.name
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "My Document");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).level, 1);
+    assert.equal((blocks[0].metadata as Record<string, unknown>).fromFrontmatter, true);
+
+    // Block 1: subtitle text block from frontmatter.description
+    assert.equal(blocks[1].type, "text");
+    assert.equal(blocks[1].content, "A short description");
+    assert.equal((blocks[1].metadata as Record<string, unknown>).subtitle, true);
+
+    // Body still parsed: heading + paragraph follow
+    assert.equal(blocks[2].type, "heading");
+    assert.equal(blocks[2].content, "Body Heading");
+    assert.equal((blocks[2].metadata as Record<string, unknown>).level, 1);
+
+    assert.equal(blocks[3].type, "text");
+    assert.equal(blocks[3].content, "Body paragraph.");
+  });
+
+  test("frontmatter falls back to title when name is absent", async () => {
+    const source = `---
+title: Fallback Title
+description: Still has a description
+---
+
+Body text.
+`;
+
+    const blocks = await markdownRenderer.parse(source, "fallback.md");
+
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "Fallback Title");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).fromFrontmatter, true);
+  });
+
+  test("frontmatter with neither name nor title injects no heading block, but still injects description subtitle", async () => {
+    const source = `---
+description: Orphan description
+---
+
+Body text.
+`;
+
+    const blocks = await markdownRenderer.parse(source, "no-name.md");
+
+    // No heading block injected — first block should be the subtitle text
+    assert.equal(blocks[0].type, "text");
+    assert.equal(blocks[0].content, "Orphan description");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).subtitle, true);
+  });
+
+  test("no frontmatter: body parsed normally with no injected header blocks", async () => {
+    const source = `# Just a Heading
+
+Just a paragraph.
+`;
+
+    const blocks = await markdownRenderer.parse(source, "no-frontmatter.md");
+
+    assert.equal(blocks.length, 2, `Expected exactly 2 blocks, got ${blocks.length}`);
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "Just a Heading");
+    assert.equal(blocks[0].metadata?.fromFrontmatter, undefined, "Should not carry fromFrontmatter when there's no frontmatter");
+    assert.equal(blocks[1].type, "text");
+    assert.equal(blocks[1].content, "Just a paragraph.");
+  });
+
+  test("CRLF frontmatter delimiters are recognized", async () => {
+    const source = "---\r\nname: CRLF Doc\r\n---\r\n\r\nBody line.\r\n";
+
+    const blocks = await markdownRenderer.parse(source, "crlf.md");
+
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "CRLF Doc");
+    // Body should still parse — last block should carry the body text
+    const textBlock = blocks.find((b) => b.type === "text");
+    assert.ok(textBlock, "Should have a parsed text block from the CRLF body");
+    assert.equal(textBlock!.content, "Body line.");
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. tokensToBlocks — main token type mapping
+  // -------------------------------------------------------------------------
+  test("heading tokens map to type:heading with metadata.level", async () => {
+    const source = `# H1\n\n## H2\n\n### H3\n`;
+    const blocks = await markdownRenderer.parse(source, "headings.md");
+
+    assert.equal(blocks.length, 3);
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "H1");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).level, 1);
+    assert.equal(blocks[1].type, "heading");
+    assert.equal((blocks[1].metadata as Record<string, unknown>).level, 2);
+    assert.equal(blocks[2].type, "heading");
+    assert.equal((blocks[2].metadata as Record<string, unknown>).level, 3);
+  });
+
+  test("paragraph tokens map to type:text", async () => {
+    const source = `A simple paragraph of text.\n`;
+    const blocks = await markdownRenderer.parse(source, "paragraph.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "text");
+    assert.equal(blocks[0].content, "A simple paragraph of text.");
+  });
+
+  test("fenced code block maps to type:code with metadata.lang from the fence info string", async () => {
+    const source = "```typescript\nconst x: number = 1;\n```\n";
+    const blocks = await markdownRenderer.parse(source, "code.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "code");
+    assert.equal(blocks[0].content, "const x: number = 1;");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).lang, "typescript");
+  });
+
+  test("fenced code block with no language info: marked yields lang '' (the ?? \"text\" fallback only catches null/undefined, not '')", async () => {
+    const source = "```\nplain fenced content\n```\n";
+    const blocks = await markdownRenderer.parse(source, "code-no-lang.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "code");
+    // NOTE: marked's lexer sets `lang` to "" (not null/undefined) when there's no
+    // fence info string, so the renderer's `t.lang ?? "text"` fallback never fires
+    // in practice for this case — the actual metadata.lang is "".
+    assert.equal((blocks[0].metadata as Record<string, unknown>).lang, "");
+  });
+
+  test("hr token maps to type:rule with empty content", async () => {
+    const source = `Above.\n\n---\n\nBelow.\n`;
+    const blocks = await markdownRenderer.parse(source, "rule.md");
+
+    const ruleBlock = blocks.find((b) => b.type === "rule");
+    assert.ok(ruleBlock, "Should have a rule block");
+    assert.equal(ruleBlock!.content, "");
+  });
+
+  test("table token maps to type:table with metadata.header and metadata.rows", async () => {
+    const source = `| Col A | Col B |\n|-------|-------|\n| a1 | b1 |\n| a2 | b2 |\n`;
+    const blocks = await markdownRenderer.parse(source, "table.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "table");
+    const meta = blocks[0].metadata as Record<string, unknown>;
+    assert.deepEqual(meta.header, ["Col A", "Col B"]);
+    assert.deepEqual(meta.rows, [
+      ["a1", "b1"],
+      ["a2", "b2"],
+    ]);
+  });
+
+  test("ordered list maps to type:text with numbered content and metadata.listType:'ol'", async () => {
+    const source = `1. First\n2. Second\n3. Third\n`;
+    const blocks = await markdownRenderer.parse(source, "ordered-list.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "text");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).listType, "ol");
+    assert.equal(blocks[0].content, "1. First\n2. Second\n3. Third");
+  });
+
+  test("unordered list maps to type:text with '  - ' prefixed content and metadata.listType:'ul'", async () => {
+    const source = `- First\n- Second\n- Third\n`;
+    const blocks = await markdownRenderer.parse(source, "unordered-list.md");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "text");
+    assert.equal((blocks[0].metadata as Record<string, unknown>).listType, "ul");
+    assert.equal(blocks[0].content, "  - First\n  - Second\n  - Third");
+  });
+
+  test("blockquote: inner blocks are recursively parsed and each carries metadata.blockquote:true", async () => {
+    const source = `> Quoted paragraph.\n>\n> ## Quoted Heading\n`;
+    const blocks = await markdownRenderer.parse(source, "blockquote.md");
+
+    assert.ok(blocks.length >= 2, `Expected at least 2 inner blocks, got ${blocks.length}`);
+    for (const block of blocks) {
+      assert.equal((block.metadata as Record<string, unknown>).blockquote, true, `Block of type "${block.type}" should carry metadata.blockquote:true`);
+    }
+    const headingBlock = blocks.find((b) => b.type === "heading");
+    assert.ok(headingBlock, "Should have an inner heading block");
+    assert.equal(headingBlock!.content, "Quoted Heading");
+    const textBlock = blocks.find((b) => b.type === "text");
+    assert.ok(textBlock, "Should have an inner text block");
+    assert.equal(textBlock!.content, "Quoted paragraph.");
   });
 });
