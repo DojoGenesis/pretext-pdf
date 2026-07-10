@@ -12,6 +12,9 @@ import { join } from "node:path";
 import { exportToPdf } from "../src/tools/export-pdf.js";
 import { chatRenderer } from "../src/renderers/chat.js";
 import { markdownRenderer } from "../src/renderers/markdown.js";
+import { structuredRenderer, isStructuredFile } from "../src/renderers/structured.js";
+import { htmlRenderer } from "../src/renderers/html.js";
+import { codeRenderer } from "../src/renderers/code.js";
 
 const FIXTURES_DIR = join(import.meta.dirname, "fixtures");
 const OUTPUT_DIR = join(import.meta.dirname, "output");
@@ -771,5 +774,419 @@ Just a paragraph.
     const textBlock = blocks.find((b) => b.type === "text");
     assert.ok(textBlock, "Should have an inner text block");
     assert.equal(textBlock!.content, "Quoted paragraph.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structured renderer — pure parse unit tests
+// These call isStructuredFile / structuredRenderer.parse directly without
+// touching the PDF pipeline.
+// ---------------------------------------------------------------------------
+
+describe("Structured renderer — pure parse", () => {
+  // -------------------------------------------------------------------------
+  // 1. isStructuredFile — explicit filename patterns (TRUE)
+  // -------------------------------------------------------------------------
+  test("filename ending 'skill.md' (case-insensitive) is structured", () => {
+    assert.equal(isStructuredFile("no markers here", "skills/foo/SKILL.md"), true);
+  });
+
+  test("filename containing 'adr-' is structured", () => {
+    assert.equal(isStructuredFile("no markers here", "decisions/ADR-001-use-pretext.md"), true);
+  });
+
+  test("filename containing '/decisions/' is structured", () => {
+    assert.equal(isStructuredFile("no markers here", "AgenticStackOrchestration/decisions/042-foo.md"), true);
+  });
+
+  test("filename ending 'status.md' is structured", () => {
+    assert.equal(isStructuredFile("no markers here", "project/STATUS.md"), true);
+  });
+
+  test("filename containing '/handoffs/' is structured", () => {
+    assert.equal(isStructuredFile("no markers here", "team/handoffs/2026-07-10_foo.md"), true);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. isStructuredFile — YAML frontmatter detection (TRUE)
+  // -------------------------------------------------------------------------
+  test("YAML frontmatter with name+description+'skill' marks the file structured", () => {
+    const source = `---
+name: My Widget
+description: A skill for building widgets
+---
+
+Body.
+`;
+    assert.equal(isStructuredFile(source, "unrelated-name.md"), true);
+  });
+
+  test("YAML frontmatter with name+description+'seed' marks the file structured", () => {
+    const source = `---
+name: My Seed
+description: A reusable seed pattern
+---
+
+Body.
+`;
+    assert.equal(isStructuredFile(source, "unrelated-name.md"), true);
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. isStructuredFile — FALSE branches
+  // -------------------------------------------------------------------------
+  test("plain .md filename with no structured markers and no frontmatter is not structured", () => {
+    assert.equal(isStructuredFile("Just a paragraph of body text.", "notes.md"), false);
+  });
+
+  test("frontmatter with name+description but missing 'skill'/'seed' is not structured", () => {
+    const source = `---
+name: My Widget
+description: A generic description with neither magic word
+---
+
+Body.
+`;
+    assert.equal(isStructuredFile(source, "unrelated-name.md"), false);
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. structuredRenderer.parse — document-type badge
+  // -------------------------------------------------------------------------
+  test("SKILL.md source: first emitted block is the uppercased 'SKILL' badge with the skill color", async () => {
+    const source = `# Test Skill\n\nBody.\n`;
+    const blocks = await structuredRenderer.parse(source, "skills/foo/SKILL.md");
+
+    assert.equal(blocks[0].type, "text");
+    assert.equal(blocks[0].content, "SKILL");
+    const meta = blocks[0].metadata as Record<string, unknown>;
+    assert.equal(meta.badge, true);
+    assert.equal(meta.badgeColor, "#4A90D9");
+  });
+
+  test("plain notes.md (no docType) yields no badge block", async () => {
+    const source = `# Hi\n\nbody\n`;
+    const blocks = await structuredRenderer.parse(source, "notes.md");
+
+    assert.ok(
+      !blocks.some((b) => (b.metadata as Record<string, unknown> | undefined)?.badge === true),
+      "Should not have a badge block when detectDocType returns null"
+    );
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, "Hi");
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. structuredRenderer.parse — roman-numeral section numbering
+  // -------------------------------------------------------------------------
+  test("level-2 heading matching '^[IVX]+\\.\\s' gets an incrementing sectionNumber + structured:true", async () => {
+    const source = `## I. Philosophy\n\nFirst.\n\n## II. When To Use\n\nSecond.\n`;
+    const blocks = await structuredRenderer.parse(source, "skills/foo/SKILL.md");
+
+    const headings = blocks.filter((b) => b.type === "heading");
+    assert.equal(headings.length, 2);
+    assert.equal((headings[0].metadata as Record<string, unknown>).sectionNumber, 1);
+    assert.equal((headings[0].metadata as Record<string, unknown>).structured, true);
+    assert.equal((headings[1].metadata as Record<string, unknown>).sectionNumber, 2);
+    assert.equal((headings[1].metadata as Record<string, unknown>).structured, true);
+  });
+
+  test("a normal '## Heading' (no roman-numeral prefix) does not get sectionNumber", async () => {
+    const source = `## Regular Heading\n\nBody.\n`;
+    const blocks = await structuredRenderer.parse(source, "skills/foo/SKILL.md");
+
+    const heading = blocks.find((b) => b.type === "heading" && b.content === "Regular Heading");
+    assert.ok(heading, "Should have the regular heading block");
+    assert.equal((heading!.metadata as Record<string, unknown>).sectionNumber, undefined);
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. structuredRenderer.parse — checklist detection
+  // -------------------------------------------------------------------------
+  test("a text block whose content literally includes '[ ]'/'[x]'/'[X]' gets metadata.checklist:true", async () => {
+    const source = `Status brackets: [ ] pending, [x] done, [X] also-done — as literal paragraph text, not a Markdown list.\n`;
+    const blocks = await structuredRenderer.parse(source, "skills/foo/SKILL.md");
+
+    const textBlock = blocks.find((b) => b.type === "text" && b.content.includes("[ ]"));
+    assert.ok(textBlock, "Should have a text block with literal checkbox brackets");
+    assert.equal((textBlock!.metadata as Record<string, unknown>).checklist, true);
+  });
+
+  // NOTE: markdown checklist syntax (`- [ ] item`) is parsed by `marked` as a GFM
+  // task-list item — `marked` strips the "[ ]"/"[x]" checkbox syntax entirely from
+  // `item.text`, so the base markdown renderer's "list" token becomes a type:"text"
+  // block whose content is "  - item" with NO literal "[ ]"/"[x]" substring. The
+  // structured enhancer's `block.content.includes("[ ]")` guard therefore never
+  // fires for real Markdown checklists — only for literal bracket text inside a
+  // paragraph (as tested above). This is the as-observed, not as-assumed, behavior;
+  // no source change was made.
+  test("a real Markdown checklist ('- [ ] item') does NOT get metadata.checklist:true (documented gap)", async () => {
+    const source = `- [ ] task one\n- [x] task two\n`;
+    const blocks = await structuredRenderer.parse(source, "skills/bar/SKILL.md");
+
+    const listBlock = blocks.find(
+      (b) => b.type === "text" && (b.metadata as Record<string, unknown> | undefined)?.listType === "ul"
+    );
+    assert.ok(listBlock, "Should have the list block from the base markdown parse");
+    assert.ok(!listBlock!.content.includes("[ ]"), "marked strips checkbox syntax from list item text");
+    assert.equal(
+      (listBlock!.metadata as Record<string, unknown>).checklist,
+      undefined,
+      "checklist guard never fires for markdown list items"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTML renderer — pure parse unit tests
+// These call htmlRenderer.parse directly without touching the PDF pipeline.
+// ---------------------------------------------------------------------------
+
+describe("HTML renderer — pure parse", () => {
+  // -------------------------------------------------------------------------
+  // 1. <title> → heading level 1
+  // -------------------------------------------------------------------------
+  test("<title> maps to heading level 1, entity-decoded, no tag-stripping applied", async () => {
+    const source = `<html><head><title>Tom &amp; Jerry: &lt;a&gt; vs &quot;b&quot; &#39;c&#39;</title></head><body></body></html>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[0].content, `Tom & Jerry: <a> vs "b" 'c'`);
+    assert.equal((blocks[0].metadata as Record<string, unknown>).level, 1);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. <h1>..<h6> → heading blocks
+  // -------------------------------------------------------------------------
+  test("<h1>..<h6> map to heading blocks with parsed metadata.level and inner tags stripped", async () => {
+    const source = `<h1>One</h1><h2>Two</h2><h3>Three <em>Emph</em></h3><h4>Four</h4><h5>Five</h5><h6>Six</h6>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const headings = blocks.filter((b) => b.type === "heading");
+    assert.equal(headings.length, 6);
+    assert.deepEqual(
+      headings.map((h) => (h.metadata as Record<string, unknown>).level),
+      [1, 2, 3, 4, 5, 6]
+    );
+    assert.equal(headings[2].content, "Three Emph", "Inner <em> tags should be stripped, text preserved");
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. <p> → text blocks; empty paragraphs skipped
+  // -------------------------------------------------------------------------
+  test("<p> maps to type:text blocks", async () => {
+    const source = `<p>First paragraph.</p><p>Second paragraph.</p>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const textBlocks = blocks.filter((b) => b.type === "text");
+    assert.equal(textBlocks.length, 2);
+    assert.equal(textBlocks[0].content, "First paragraph.");
+    assert.equal(textBlocks[1].content, "Second paragraph.");
+  });
+
+  test("empty and whitespace-only paragraphs are skipped", async () => {
+    const source = `<p>   </p><p></p><p>Real content.</p>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const textBlocks = blocks.filter((b) => b.type === "text");
+    assert.equal(textBlocks.length, 1);
+    assert.equal(textBlocks[0].content, "Real content.");
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. <pre><code class="language-xxx"> → code block
+  // -------------------------------------------------------------------------
+  // NOTE: the capture regex is
+  //   /<pre[^>]*><code[^>]*(?:class="[^"]*language-(\w+)")?[^>]*>([\s\S]*?)<\/code><\/pre>/gi
+  // The FIRST `[^>]*` after `<code` is greedy and consumes every non-'>' char up to
+  // the closing '>' — including the class attribute — before the optional language
+  // group ever gets a chance to match (it matches empty and succeeds trivially, so
+  // the engine never backtracks into it). As a result match[1] (the language) is
+  // ALWAYS undefined, and metadata.lang is ALWAYS the `?? "text"` fallback, even
+  // when a `language-xxx` class is present. Verified empirically; not fixed here.
+  test('<pre><code class="language-xxx"> never actually captures the language — metadata.lang is always the "text" fallback', async () => {
+    const source = `<pre><code class="language-python">print(1)</code></pre>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const codeBlock = blocks.find((b) => b.type === "code");
+    assert.ok(codeBlock, "Should have a code block");
+    assert.equal(codeBlock!.content, "print(1)");
+    assert.equal((codeBlock!.metadata as Record<string, unknown>).lang, "text");
+  });
+
+  test("<pre><code> with no language class also falls back to metadata.lang:'text' (same fallback path)", async () => {
+    const source = `<pre><code>plain content</code></pre>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const codeBlock = blocks.find((b) => b.type === "code");
+    assert.ok(codeBlock, "Should have a code block");
+    assert.equal((codeBlock!.metadata as Record<string, unknown>).lang, "text");
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. <script>, <style>, <!-- comments --> stripped
+  // -------------------------------------------------------------------------
+  test("<script>, <style>, and HTML comments are stripped before extraction and never appear in any block", async () => {
+    const source = `<html><head><script>var secretScript = 1;</script><style>.secretStyle { color: red; }</style></head><body><!-- a secret comment --><p>Visible paragraph.</p></body></html>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const allContent = blocks.map((b) => b.content).join("\n");
+    assert.ok(!allContent.includes("secretScript"), "Script content should be stripped");
+    assert.ok(!allContent.includes("secretStyle"), "Style content should be stripped");
+    assert.ok(!allContent.includes("secret comment"), "Comment content should be stripped");
+    assert.ok(allContent.includes("Visible paragraph."), "Visible text should remain");
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Entity decoding
+  // -------------------------------------------------------------------------
+  test("decodes &amp; &quot; &#39; &nbsp;, numeric &#NN; and hex &#xHH; entities in a paragraph", async () => {
+    const source = `<p>Fixed: &amp; and &quot;quoted&quot; and it&#39;s nbsp:&nbsp;end numeric:&#65; hex:&#x42;</p>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const textBlock = blocks.find((b) => b.type === "text");
+    assert.ok(textBlock, "Should have a text block");
+    assert.equal(textBlock!.content, `Fixed: & and "quoted" and it's nbsp: end numeric:A hex:B`);
+  });
+
+  // NOTE: decodeEntities runs BEFORE stripTags for paragraphs/headings. If the
+  // decoded entities happen to form something that LOOKS like a tag (e.g. &lt;
+  // and &gt; decoding to a literal "<...>"), stripTags's `/<[^>]+>/g` regex will
+  // then match and remove it — silently eating decoded angle-bracket content
+  // rather than preserving it as visible text. Verified empirically; documented
+  // as-observed behavior, not a bug fix.
+  test("decoded &lt;/&gt; can be silently eaten by the tag-stripping regex (documented gap)", async () => {
+    const source = `<p>Before &lt;tag&gt; After</p>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    const textBlock = blocks.find((b) => b.type === "text");
+    assert.ok(textBlock, "Should have a text block");
+    assert.equal(textBlock!.content, "Before After");
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. No-structured-content fallback
+  // -------------------------------------------------------------------------
+  test("source with visible body text but no title/heading/p/code yields a single text block from the stripped body", async () => {
+    const source = `<html><body>bare text with no tags</body></html>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "text");
+    assert.equal(blocks[0].content, "bare text with no tags");
+  });
+
+  test("a bare <div> with no <body> wrapper falls back to the full cleaned source as text", async () => {
+    const source = `<div>just a div, no body wrapper</div>`;
+    const blocks = await htmlRenderer.parse(source, "test.html");
+
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].type, "text");
+    assert.equal(blocks[0].content, "just a div, no body wrapper");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Code renderer — pure parse unit tests
+// These call codeRenderer.parse directly without touching the PDF pipeline.
+// ---------------------------------------------------------------------------
+
+describe("Code renderer — pure parse", () => {
+  // -------------------------------------------------------------------------
+  // 1. Block order + shape
+  // -------------------------------------------------------------------------
+  test("emits heading (fileHeader) → text subtitle → rule → code block, in that order", async () => {
+    const source = "line1\nline2\nline3\n";
+    const blocks = await codeRenderer.parse(source, "path/to/foo.ts");
+
+    assert.equal(blocks.length, 4);
+    assert.equal(blocks[0].type, "heading");
+    assert.equal(blocks[1].type, "text");
+    assert.equal(blocks[2].type, "rule");
+    assert.equal(blocks[3].type, "code");
+  });
+
+  test("file header content is the basename, not the full path", async () => {
+    const blocks = await codeRenderer.parse("const x = 1;\n", "path/to/foo.ts");
+
+    assert.equal(blocks[0].content, "foo.ts");
+    const meta = blocks[0].metadata as Record<string, unknown>;
+    assert.equal(meta.level, 2);
+    assert.equal(meta.fileHeader, true);
+  });
+
+  test("subtitle block content is '<lang> | <n> lines' with metadata.subtitle and metadata.muted", async () => {
+    const source = "line1\nline2\nline3\n";
+    const blocks = await codeRenderer.parse(source, "path/to/foo.ts");
+
+    assert.equal(blocks[1].content, "typescript | 4 lines");
+    const meta = blocks[1].metadata as Record<string, unknown>;
+    assert.equal(meta.subtitle, true);
+    assert.equal(meta.muted, true);
+  });
+
+  test("rule block has empty content", async () => {
+    const blocks = await codeRenderer.parse("x\n", "foo.ts");
+    assert.equal(blocks[2].type, "rule");
+    assert.equal(blocks[2].content, "");
+  });
+
+  test("code block content is the full untouched source, with metadata carrying lang/filename/lineCount", async () => {
+    const source = "line1\nline2\nline3\n";
+    const filename = "path/to/foo.ts";
+    const blocks = await codeRenderer.parse(source, filename);
+
+    assert.equal(blocks[3].type, "code");
+    assert.equal(blocks[3].content, source);
+    const meta = blocks[3].metadata as Record<string, unknown>;
+    assert.equal(meta.lang, "typescript");
+    assert.equal(meta.filename, filename);
+    assert.equal(meta.lineCount, 4);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. Language detection via extension
+  // -------------------------------------------------------------------------
+  test("detects language from extension: .ts→typescript, .go→go, .py→python", async () => {
+    const cases: Array<[string, string]> = [
+      ["file.ts", "typescript"],
+      ["file.go", "go"],
+      ["file.py", "python"],
+    ];
+    for (const [filename, expectedLang] of cases) {
+      const blocks = await codeRenderer.parse("code\n", filename);
+      const codeBlock = blocks.find((b) => b.type === "code")!;
+      assert.equal(
+        (codeBlock.metadata as Record<string, unknown>).lang,
+        expectedLang,
+        `Expected lang "${expectedLang}" for ${filename}`
+      );
+    }
+  });
+
+  test("unknown extension falls back to metadata.lang:'text'", async () => {
+    const blocks = await codeRenderer.parse("mystery content\n", "notes.xyz");
+    const codeBlock = blocks.find((b) => b.type === "code")!;
+    assert.equal((codeBlock.metadata as Record<string, unknown>).lang, "text");
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Line counting
+  // -------------------------------------------------------------------------
+  test("lineCount and the subtitle count both equal source.split('\\n').length for a multi-line fixture", async () => {
+    const source = "a\nb\nc\nd\ne\n";
+    const blocks = await codeRenderer.parse(source, "multi.py");
+    const expected = source.split("\n").length;
+
+    const codeBlock = blocks.find((b) => b.type === "code")!;
+    assert.equal((codeBlock.metadata as Record<string, unknown>).lineCount, expected);
+
+    const subtitleBlock = blocks.find((b) => (b.metadata as Record<string, unknown> | undefined)?.subtitle === true)!;
+    assert.equal(subtitleBlock.content, `python | ${expected} lines`);
+  });
+
+  test("filename with no directory component still yields the whole filename as the header", async () => {
+    const blocks = await codeRenderer.parse("x\n", "standalone.go");
+    assert.equal(blocks[0].content, "standalone.go");
   });
 });
