@@ -15,6 +15,7 @@ import { markdownRenderer } from "../src/renderers/markdown.js";
 import { structuredRenderer, isStructuredFile } from "../src/renderers/structured.js";
 import { htmlRenderer } from "../src/renderers/html.js";
 import { codeRenderer } from "../src/renderers/code.js";
+import { selectRenderer } from "../src/renderers/index.js";
 
 const FIXTURES_DIR = join(import.meta.dirname, "fixtures");
 const OUTPUT_DIR = join(import.meta.dirname, "output");
@@ -1188,5 +1189,168 @@ describe("Code renderer — pure parse", () => {
   test("filename with no directory component still yields the whole filename as the header", async () => {
     const blocks = await codeRenderer.parse("x\n", "standalone.go");
     assert.equal(blocks[0].content, "standalone.go");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Renderer selection — selectRenderer
+// Pure dispatch function: no FS, no canvas, no pdf-lib, no network.
+// Priority order per the doc-comment: (1) explicit override, (2) structured
+// detection, (3) chat JSON detection, (4) extension matching, (5) codeRenderer
+// fallback.
+// ---------------------------------------------------------------------------
+
+describe("Renderer selection — selectRenderer", () => {
+  // -------------------------------------------------------------------------
+  // 1. Explicit renderer name override
+  // -------------------------------------------------------------------------
+  test("explicit:'chat' resolves to chatRenderer regardless of filename/source", () => {
+    const renderer = selectRenderer("notes.md", "irrelevant source", "chat");
+    assert.equal(renderer, chatRenderer);
+  });
+
+  test("explicit:'html' resolves to htmlRenderer regardless of filename/source", () => {
+    const renderer = selectRenderer("notes.md", "irrelevant source", "html");
+    assert.equal(renderer, htmlRenderer);
+  });
+
+  test("explicit:'markdown' resolves to markdownRenderer regardless of filename/source", () => {
+    const renderer = selectRenderer("notes.txt", "irrelevant source", "markdown");
+    assert.equal(renderer, markdownRenderer);
+  });
+
+  test("explicit:'code' resolves to codeRenderer regardless of filename/source", () => {
+    const renderer = selectRenderer("notes.md", "irrelevant source", "code");
+    assert.equal(renderer, codeRenderer);
+  });
+
+  test("explicit:'structured' resolves to structuredRenderer even though it is NOT in the renderers array", () => {
+    // structuredRenderer.extensions is [] and it is deliberately excluded from
+    // the internal `renderers` array (see index.ts comment) — it is only
+    // reachable via this explicit-name special case or content-based detection.
+    const renderer = selectRenderer("notes.md", "irrelevant source", "structured");
+    assert.equal(renderer, structuredRenderer);
+  });
+
+  test("explicit:'auto' is treated as no override — falls through to normal detection", () => {
+    const renderer = selectRenderer("page.html", "<p>hi</p>", "auto");
+    assert.equal(renderer, htmlRenderer);
+  });
+
+  test("explicit with an unrecognized name throws 'Unknown renderer: <name>'", () => {
+    assert.throws(
+      () => selectRenderer("notes.md", "irrelevant source", "made-up-renderer"),
+      /Unknown renderer: made-up-renderer/
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. Structured file detection (content-based, only for .md/.markdown)
+  // -------------------------------------------------------------------------
+  test("a structured .md file (e.g. SKILL.md) resolves to structuredRenderer via content/filename detection", () => {
+    const renderer = selectRenderer("skills/foo/SKILL.md", "# Test Skill\n\nBody.\n");
+    assert.equal(renderer, structuredRenderer);
+  });
+
+  test("a non-structured .md file falls through structured detection to markdownRenderer via the extension loop", () => {
+    const renderer = selectRenderer("notes.md", "Just a plain paragraph, no structured markers.");
+    assert.equal(renderer, markdownRenderer);
+  });
+
+  // NOTE: the structured-detection branch only fires for ext === ".md" or
+  // ".markdown" — a structured-looking file with a ".mdx" extension (e.g. a
+  // filename matching "skill.mdx") never reaches isStructuredFile() at all,
+  // because the `(ext === ".md" || ext === ".markdown")` guard excludes it.
+  // It falls straight through to the extension loop, where markdownRenderer's
+  // extensions array (which DOES include ".mdx") matches instead. Verified
+  // against the actual source; not a source change.
+  test("a structured-looking filename with a .mdx extension is NOT detected as structured (guard excludes .mdx)", () => {
+    const renderer = selectRenderer("skills/foo/SKILL.mdx", "# Test Skill\n\nBody.\n");
+    assert.equal(renderer, markdownRenderer, "structured guard only checks .md/.markdown, so .mdx bypasses it entirely");
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Chat JSON detection (filename-suffix based, checked before the
+  //    extension loop)
+  // -------------------------------------------------------------------------
+  // NOTE: this branch is NOT redundant with the extension loop below — it is
+  // the ONLY way selectRenderer ever reaches chatRenderer via filename alone.
+  // node:path's extname() only returns the segment after the LAST dot, so
+  // extname("test.chat.json") === ".json", never ".chat.json". chatRenderer's
+  // own `extensions: [".chat.json", ".conversation.json"]` entries (declared
+  // in chat.ts) can therefore never match inside the extension-matching loop
+  // (step 4) — that loop only ever compares against a single-segment ext like
+  // ".json". Proof: codeRenderer's extensions list also contains plain
+  // ".json" (see code.ts EXTENSION_TO_LANG), so if this endsWith() special
+  // case were removed, a "*.chat.json" file would silently fall through to
+  // codeRenderer (plain-text/code rendering) instead of remaining
+  // unclassified — because ".json" still matches code's extension list.
+  // Verified empirically (`extname("test.chat.json")` === ".json") and
+  // against source; no source change made.
+  test("*.chat.json suffix resolves to chatRenderer (extname() alone would only ever see '.json')", () => {
+    const renderer = selectRenderer("conversation.chat.json", '{"messages":[]}');
+    assert.equal(renderer, chatRenderer);
+  });
+
+  test("*.conversation.json suffix resolves to chatRenderer", () => {
+    const renderer = selectRenderer("dojo.conversation.json", '{"messages":[]}');
+    assert.equal(renderer, chatRenderer);
+  });
+
+  test("a plain .json file (no .chat.json/.conversation.json suffix) is NOT routed to chatRenderer — it falls to codeRenderer via the extension loop", () => {
+    const renderer = selectRenderer("data.json", '{"foo":1}');
+    assert.equal(renderer, codeRenderer, "plain .json matches codeRenderer's extensions list (EXTENSION_TO_LANG['.json'])");
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. Extension-based matching over the renderers array
+  //    (order: chat, html, markdown, code)
+  // -------------------------------------------------------------------------
+  test("'.html' extension resolves to htmlRenderer via the extension loop", () => {
+    const renderer = selectRenderer("page.html", "<p>hi</p>");
+    assert.equal(renderer, htmlRenderer);
+  });
+
+  test("'.htm' and '.xhtml' extensions also resolve to htmlRenderer", () => {
+    assert.equal(selectRenderer("page.htm", "<p>hi</p>"), htmlRenderer);
+    assert.equal(selectRenderer("page.xhtml", "<p>hi</p>"), htmlRenderer);
+  });
+
+  test("'.markdown' extension resolves to markdownRenderer", () => {
+    const renderer = selectRenderer("notes.markdown", "plain body");
+    assert.equal(renderer, markdownRenderer);
+  });
+
+  test("'.mdx' extension resolves to markdownRenderer", () => {
+    const renderer = selectRenderer("notes.mdx", "plain body");
+    assert.equal(renderer, markdownRenderer);
+  });
+
+  test("a code extension (e.g. '.ts') resolves to codeRenderer via the extension loop", () => {
+    const renderer = selectRenderer("index.ts", "const x = 1;");
+    assert.equal(renderer, codeRenderer);
+  });
+
+  test("extension matching is case-insensitive: '.MD' resolves the same as '.md'", () => {
+    const renderer = selectRenderer("NOTES.MD", "plain body, no structured markers");
+    assert.equal(renderer, markdownRenderer, "extname(...).toLowerCase() should normalize '.MD' to '.md'");
+  });
+
+  test("extension matching is case-insensitive: '.HTML' resolves the same as '.html'", () => {
+    const renderer = selectRenderer("PAGE.HTML", "<p>hi</p>");
+    assert.equal(renderer, htmlRenderer);
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. Fallback to codeRenderer (treat as plain text)
+  // -------------------------------------------------------------------------
+  test("an unrecognized extension falls back to codeRenderer", () => {
+    const renderer = selectRenderer("mystery.xyz", "some unclassified content");
+    assert.equal(renderer, codeRenderer);
+  });
+
+  test("a filename with no extension at all falls back to codeRenderer", () => {
+    const renderer = selectRenderer("README", "some unclassified content");
+    assert.equal(renderer, codeRenderer);
   });
 });
